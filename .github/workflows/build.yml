@@ -40,7 +40,7 @@ jobs:
     - name: Upload build artifact
       uses: actions/upload-artifact@v4
       with:
-        name: 报告生成器
+        name: reports-generator
         path: release/
         
     # 自动发布版本(可选)
