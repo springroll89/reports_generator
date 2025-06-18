@@ -1,4 +1,4 @@
-name: Build Application
+≈≈name: Build Application
 
 on:
   push:
@@ -28,7 +28,7 @@ jobs:
         
     - name: Build with PyInstaller
       run: |
-        pyinstaller --onefile --name="报告生成器" generate_reports.py
+        pyinstaller --onefile --name="报告生成器" generate_reports_cross_platform.py
         
     - name: Prepare release package
       run: |
