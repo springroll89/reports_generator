@@ -38,7 +38,7 @@ jobs:
         copy reports_input\* release\reports_input\
         
     - name: Upload build artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: 报告生成器
         path: release/
