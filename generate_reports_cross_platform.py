@@ -227,6 +227,51 @@ for path in files:
             })
         ab_sheets[name] = pd.DataFrame(recs)
 
+    # ========== 新增 平均异常分析（绝对0.9L/min阈值） ==========
+    # 窗口：7min ~ 燃尽前2min
+    win_start = 7 * 60
+    avg_arr   = df['平均流量L/Min'].values
+    ts        = df['时间(s)'].values
+
+    # 找到最后一个非零平均流量时刻作为燃尽点
+    nz = np.where(avg_arr > 0)[0]
+    burn_out_time = ts[nz[-1]] if nz.size else ts[0]
+    win_end = max(burn_out_time - 120, win_start)
+
+    # 异常判据：平均流量 < 0.9L/min（绝对值！）
+    mask = (ts >= win_start) & (ts <= win_end)
+    abnormal = (avg_arr < 0.9) & mask
+
+    exception_records = []
+    in_block = False
+    for i in range(len(ts)):
+        if abnormal[i]:
+            if not in_block:
+                block_start = ts[i]
+                start_oxy = np.trapz(avg_arr[:i+1], ts[:i+1]) / 60
+                in_block = True
+            block_end = ts[i]
+            end_oxy = np.trapz(avg_arr[:i+1], ts[:i+1]) / 60
+        else:
+            if in_block:
+                exception_records.append({
+                    "开始时间(秒)": round(block_start, 2),
+                    "结束时间(秒)": round(block_end, 2),
+                    "持续时间(秒)": round(block_end - block_start, 2),
+                    "起点累积流量(升)": round(start_oxy, 2),
+                    "终点累积流量(升)": round(end_oxy, 2),
+                })
+                in_block = False
+    if in_block:
+        exception_records.append({
+            "开始时间(秒)": round(block_start, 2),
+            "结束时间(秒)": round(block_end, 2),
+            "持续时间(秒)": round(block_end - block_start, 2),
+            "起点累积流量(升)": round(start_oxy, 2),
+            "终点累积流量(升)": round(end_oxy, 2),
+        })
+    df_avg_exception = pd.DataFrame(exception_records)
+
     # 8) 燃烧定位表计算
     # 计算每个时间点的累积产氧量
     cumulative_oxygen = []
@@ -291,7 +336,9 @@ for path in files:
         crit_df.to_excel(writer, '关键点分析', index=False)
         perf_df.to_excel(writer, '性能指标分析', index=False)
         key_burn_location_df.to_excel(writer, '燃烧定位表', index=False)
-        
+        # ...已有写入...
+        df_avg_exception.to_excel(writer, '平均异常分析表_0.9阈值', index=False) 
+
         for name, df_ab in ab_sheets.items():
             sheet = f'异常分析_{name}'
             df_ab.to_excel(writer, sheet, index=False)
