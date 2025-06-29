@@ -8,12 +8,13 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.font_manager import FontProperties
+from scipy.signal import savgol_filter
+from scipy.integrate import trapezoid
+import sys
 
 # ————————————
 # 一、配置路径
 # ————————————
-
-import sys
 
 # 确保使用相对路径，适用于Windows和Mac环境
 def get_base_dir():
@@ -27,7 +28,6 @@ def get_base_dir():
 
 # 设置基础路径
 BASE_DIR = get_base_dir()
-
 INPUT_DIR = os.path.join(BASE_DIR, 'reports_input')
 OUT_DIR   = os.path.join(BASE_DIR, 'reports_output')
 
@@ -40,39 +40,136 @@ if os.path.exists(font_file):
     plt.rcParams['font.family'] = prop.get_name()
 
 # ————————————
-# 三、读取基准曲线
+# 三、数据清洗函数
+# ————————————
+def clean_flow_data(data, window_length=11, polyorder=3):
+    """
+    使用Savitzky-Golay滤波器清洗流量数据
+    - window_length: 滤波窗口长度（必须是奇数）
+    - polyorder: 多项式阶数
+    """
+    # 找到第一个非零值的位置
+    first_nonzero = np.argmax(data > 0)
+    if first_nonzero == 0 and data[0] == 0:
+        # 如果所有值都是0，返回原始数据
+        first_nonzero = len(data)
+    
+    # 创建清洗后的数据副本
+    cleaned_data = data.copy()
+    
+    # 只清洗非零部分的数据
+    if first_nonzero < len(data):
+        nonzero_data = data[first_nonzero:]
+        
+        # 确保窗口长度是奇数
+        if window_length % 2 == 0:
+            window_length += 1
+        
+        # 如果非零数据长度小于窗口长度，调整窗口长度
+        if len(nonzero_data) < window_length:
+            window_length = len(nonzero_data) if len(nonzero_data) % 2 == 1 else len(nonzero_data) - 1
+            if window_length < 5:  # 最小窗口长度
+                return cleaned_data  # 数据太少，返回原始数据
+        
+        # 应用Savitzky-Golay滤波器
+        try:
+            cleaned_nonzero = savgol_filter(nonzero_data, window_length, polyorder)
+            # 确保清洗后的数据不为负
+            cleaned_nonzero = np.maximum(cleaned_nonzero, 0)
+            # 替换非零部分
+            cleaned_data[first_nonzero:] = cleaned_nonzero
+        except:
+            pass  # 如果滤波失败，保持原始数据
+    
+    return cleaned_data
+
+# ————————————
+# 四、读取温度数据函数
+# ————————————
+def read_temperature_data(input_dir):
+    """
+    读取输入目录中的温度CSV文件
+    """
+    # 查找所有CSV文件（排除基准曲线文件）
+    csv_files = glob.glob(os.path.join(input_dir, '*.csv'))
+    csv_files = [f for f in csv_files if '基准曲线' not in os.path.basename(f)]
+    
+    if not csv_files:
+        print("⚠️ 未找到温度数据CSV文件")
+        return None, None
+    
+    # 读取第一个找到的CSV文件
+    temp_file = csv_files[0]
+    print(f"✅ 读取温度数据: {os.path.basename(temp_file)}")
+    
+    # 尝试不同的编码方式读取
+    encodings = ['gbk', 'gb2312', 'utf-8', 'cp1252', 'latin1']
+    for encoding in encodings:
+        try:
+            temp_df = pd.read_csv(temp_file, encoding=encoding)
+            # 检查是否包含CH1-CH3列
+            required_cols = ['CH1', 'CH2', 'CH3']
+            if all(col in temp_df.columns for col in required_cols):
+                # 提取温度数据
+                temp_data = temp_df[required_cols].values
+                # 清洗温度数据（使用较小的窗口）
+                smoothed_temp = np.zeros_like(temp_data)
+                for i in range(3):
+                    smoothed_temp[:, i] = clean_flow_data(temp_data[:, i], window_length=7, polyorder=2)
+                
+                # 温度数据是2秒采样，返回实际时长
+                temp_length = len(smoothed_temp) * 2  # 2秒采样间隔
+                print(f"✅ 温度数据点数: {len(smoothed_temp)}, 时长: {temp_length}秒")
+                
+                return smoothed_temp, temp_length
+            else:
+                print(f"⚠️ CSV文件缺少必要的列: {required_cols}")
+                return None, None
+        except:
+            continue
+    
+    print("❌ 无法读取温度数据文件")
+    return None, None
+
+# ————————————
+# 五、读取基准曲线
 # ————————————
 baseline_csv = os.path.join(INPUT_DIR, '.基准曲线 1.csv')
 base_df = pd.read_csv(baseline_csv)
 base_t, base_f = base_df['time'].values, base_df['flow'].values
 
 # ————————————
-# 四、读取刻度表
+# 六、读取刻度表
 # ————————————
 scale_file = os.path.join(INPUT_DIR, '.副本4P、2P22M氧烛分层及刻度.xlsx')
-scale_4p22m = pd.read_excel(scale_file, sheet_name='4P22M')
-scale_2p22m = pd.read_excel(scale_file, sheet_name='2P22M')
+try:
+    scale_4p22m = pd.read_excel(scale_file, sheet_name='4P22M')
+    scale_2p22m = pd.read_excel(scale_file, sheet_name='2P22M')
+    print(f"✅ 成功读取刻度表")
+except Exception as e:
+    print(f"⚠️ 读取刻度表失败: {e}")
+    scale_4p22m = pd.DataFrame()
+    scale_2p22m = pd.DataFrame()
 
 # ————————————
-# 五、报告通用参数
+# 七、报告通用参数
 # ————————————
 KEY_TIMES = [60, 100, 142, 360, 1200]   # 关键时间点（秒）
-NOTE_TEXT = (
-    "\"流量差异\"指在不达标时间段内，实际瞬时流量低于基准曲线的累积体积差值（L）。\n"
-    "计算方法：对(b(t)-a(t))积分并除以60。\n"
-    "\"起点累积流量(升)\"指从点火时刻到异常起始时刻所累积的总产氧量（L）。\n"
-    "\"终点累积流量(升)\"指从点火时刻到异常结束时刻所累积的总产氧量（L）。"
-)
 
 # ————————————
-# 六、准备输出目录
+# 八、准备输出目录
 # ————————————
 if os.path.exists(OUT_DIR):
     shutil.rmtree(OUT_DIR)
 os.makedirs(OUT_DIR)
 
 # ————————————
-# 七、扫描并处理每个原始表
+# 九、读取温度数据
+# ————————————
+temperature_data, temp_length = read_temperature_data(INPUT_DIR)
+
+# ————————————
+# 十、扫描并处理每个原始表
 # ————————————
 pattern = os.path.join(INPUT_DIR, '副本氧气流量采集分析表*.xlsx')
 files = glob.glob(pattern)
@@ -80,335 +177,719 @@ if not files:
     print(f"❌ 在 {INPUT_DIR} 未找到任何符合 '副本氧气流量采集分析表*.xlsx' 的文件")
     exit(1)
 
+# 处理每个流量采集分析表
 for path in files:
     label = os.path.splitext(os.path.basename(path))[0]
-    # 1) 读取原始（已预处理）Excel
+    print(f"\n{'='*50}")
+    print(f"处理文件: {label}")
+    print(f"{'='*50}")
+    
+    # 1) 读取原始Excel
     raw_df = pd.read_excel(path)
 
-    # 2) 解析采集时间，并标准化成 秒 数
+    # 2) 解析采集时间，处理0.5秒采样的问题
     raw_df['采集时间'] = pd.to_datetime(
         raw_df['采集时间'], format='%Y年%m月%d日%H:%M:%S'
     )
-    t0 = raw_df['采集时间'].iloc[0]
-    raw_df['时间(s)'] = (raw_df['采集时间'] - t0).dt.total_seconds()
-
-    # 3) 计算平均与基准
-    SENSORS = [f"{i}号瞬时流量L/Min" for i in range(1,5)]
+    
+    # 处理相同时间戳的问题（0.5秒采样）
+    time_counts = {}
+    adjusted_times = []
+    
+    for time in raw_df['采集时间']:
+        if time in time_counts:
+            time_counts[time] += 1
+            # 添加0.5秒的偏移
+            adjusted_time = time + pd.Timedelta(seconds=0.5 * (time_counts[time] - 1))
+            adjusted_times.append(adjusted_time)
+        else:
+            time_counts[time] = 1
+            adjusted_times.append(time)
+    
+    raw_df['采集时间_调整'] = adjusted_times
+    t0 = raw_df['采集时间_调整'].iloc[0]
+    raw_df['时间(s)'] = (raw_df['采集时间_调整'] - t0).dt.total_seconds()
+    
+    # 3) 定义传感器列
+    SENSORS = [f"{i}号瞬时流量L/Min" for i in range(1, 5)]
     df = raw_df.copy()
     
-    # 判断是4P还是2P模式
-    # 通过检查3号和4号传感器是否有非零数据
-    sensor_3_4_has_data = (df['3号瞬时流量L/Min'] > 0).any() or (df['4号瞬时流量L/Min'] > 0).any()
+    # 4) 数据清洗 - 对每个传感器的流量数据进行清洗（保留前面的0值）
+    for sensor in SENSORS:
+        original_data = df[sensor].values
+        cleaned_data = clean_flow_data(original_data)
+        df[sensor] = cleaned_data
     
-    if sensor_3_4_has_data:
+    # 5) 判断模式（基于清洗后的数据）
+    sensor_3_has_data = (df['3号瞬时流量L/Min'] > 0.1).any()
+    sensor_4_has_data = (df['4号瞬时流量L/Min'] > 0.1).any()
+    
+    if sensor_3_has_data and sensor_4_has_data:
         # 4P模式：使用所有4个传感器
         active_sensors = SENSORS
-        scale_df = scale_4p22m
         mode = '4P22M'
+        scale_df = scale_4p22m
     else:
         # 2P模式：只使用1号和2号传感器
         active_sensors = SENSORS[:2]
-        scale_df = scale_2p22m
         mode = '2P22M'
+        scale_df = scale_2p22m
     
+    print(f"✅ 检测到模式: {mode}")
+    print(f"✅ 活跃传感器: {active_sensors}")
+    
+    # 6) 计算平均流量（基于清洗后的数据）
     df['平均流量L/Min'] = df[active_sensors].mean(axis=1)
     df['基准流量L/Min'] = np.interp(df['时间(s)'], base_t, base_f)
-
-    # 4) 原始数据 Sheet
-    raw_cols = ['时间(s)'] + SENSORS + ['平均流量L/Min', '基准流量L/Min']
-    raw_data = df[raw_cols]
-
-    # 5) 关键点分析
-    crit = []
-    for t in KEY_TIMES:
-        sub = df[df['时间(s)'] <= t]
-        rec = {'时间点(s)': t}
-        for s in SENSORS:
-            rec[f'{s}_总流量(L)'] = round(np.trapz(sub[s], sub['时间(s)'])/60, 2)
-        rec['平均总流量(L)'] = round(np.trapz(sub['平均流量L/Min'], sub['时间(s)'])/60, 2)
-        xi = np.linspace(0, t, int(t*2)+1)
-        rec['基准总流量(L)'] = round(np.trapz(np.interp(xi, base_t, base_f), xi)/60, 2)
-        crit.append(rec)
-    crit_df = pd.DataFrame(crit)
-
-    # 6) 性能指标分析（含产氧时间）
-    t_arr = df['时间(s)'].values
-    base_curve = np.interp(t_arr, base_t, base_f)
-    perf = []
-    for idx, s in enumerate(SENSORS, start=1):
-        arr = df[s].values
-        # 启动时长
-        pos_idx = np.where(arr > 0)[0]
-        start   = df['时间(s)'].iloc[pos_idx[0]] if len(pos_idx) else np.nan
-        # 达峰时长
-        peak_idx = np.where(arr >= 3.75)[0]
-        peak     = df['时间(s)'].iloc[peak_idx[0]] if len(peak_idx) else np.nan
-        # 累计流量
-        total    = round(np.trapz(arr, t_arr)/60, 2)
-        # 达标率
-        rate     = round((arr >= base_curve).mean()*100, 2)
-        # 产氧时间：从 start 到最后一次 >0
-        last_idx = pos_idx[-1] if len(pos_idx) else None
-        end_time = df['时间(s)'].iloc[last_idx] if last_idx is not None else np.nan
-        oxy_time = round((end_time - start)/60, 2) if last_idx is not None else np.nan
-
-        perf.append({
-            '设备':            f'{idx}号',
-            '启动时长(秒)':    round(start, 2),
-            '达峰时长(秒)':    round(peak, 2),
-            '累计流量(升)':    total,
-            '达标率(%)':      rate,
-            '产氧时间(分钟)': oxy_time
+    
+    # 7) 对齐温度数据
+    if temperature_data is not None:
+        flow_length = len(df)
+        flow_time_length = df['时间(s)'].iloc[-1]  # 流量数据的总时长（秒）
+        
+        # 初始化温度列为NaN
+        df['CH1温度'] = np.nan
+        df['CH2温度'] = np.nan
+        df['CH3温度'] = np.nan
+        
+        # 温度数据是2秒采样，需要插值到0.5秒采样的流量数据时间点
+        temp_data_points = len(temperature_data)
+        temp_time_points = np.arange(0, temp_data_points * 2, 2)  # 0, 2, 4, 6...秒
+        
+        print(f"温度数据插值: {temp_data_points}个点，时间范围0-{temp_time_points[-1]}秒")
+        
+        # 对每个温度通道进行插值
+        for i, ch in enumerate(['CH1温度', 'CH2温度', 'CH3温度']):
+            # 使用线性插值将2秒采样的温度数据映射到0.5秒采样的时间点
+            interpolated_temp = np.interp(
+                df['时间(s)'].values,  # 目标时间点（0.5秒间隔）
+                temp_time_points,       # 原始时间点（2秒间隔）
+                temperature_data[:, i], # 原始温度值
+                left=np.nan,           # 超出范围的左侧值
+                right=np.nan           # 超出范围的右侧值
+            )
+            df[ch] = interpolated_temp
+        
+        print(f"✅ 温度数据对齐完成")
+    
+    # 8) 性能指标分析
+    performance_data = []
+    for sensor in active_sensors:
+        # 启动时长：从开始采集到流量大于零的第一个时间点
+        start_idx = df[df[sensor] > 0].index
+        start_time = df.loc[start_idx[0], '时间(s)'] if len(start_idx) > 0 else np.nan
+        
+        # 达峰时长：流量首次达到3.75 L/min的时间
+        peak_idx = df[df[sensor] >= 3.75].index
+        peak_time = df.loc[peak_idx[0], '时间(s)'] if len(peak_idx) > 0 else np.nan
+        
+        # 累计流量：对时间和流量的积分
+        total_flow = round(trapezoid(df[sensor], df['时间(s)'])/60, 2)
+        
+        # 达标率：流量大于等于基准曲线的部分占总时间的比例
+        compliance_count = (df[sensor] >= df['基准流量L/Min']).sum()
+        total_count = len(df)
+        compliance_rate = round(compliance_count / total_count * 100, 2) if total_count > 0 else 0
+        
+        # 产氧时间：从启动时长到流量最后大于零的时刻
+        if not np.isnan(start_time):
+            last_nonzero_idx = df[df[sensor] > 0].index[-1] if len(df[df[sensor] > 0]) > 0 else 0
+            last_time = df.loc[last_nonzero_idx, '时间(s)']
+            oxygen_time = round((last_time - start_time) / 60, 2)
+        else:
+            oxygen_time = 0
+        
+        performance_data.append({
+            '设备': sensor.replace('瞬时流量L/Min', ''),
+            '启动时长(秒)': round(start_time, 0) if not np.isnan(start_time) else 0,
+            '达峰时长(秒)': round(peak_time, 0) if not np.isnan(peak_time) else 0,
+            '累计流量(升)': total_flow,
+            '达标率(%)': compliance_rate,
+            '产氧时间(分钟)': oxygen_time
         })
-
-    # 平均值
-    arr = df['平均流量L/Min'].values
-    pos_idx = np.where(arr > 0)[0]
-    start2   = df['时间(s)'].iloc[pos_idx[0]] if len(pos_idx) else np.nan
-    peak2_idx= np.where(arr >= 3.75)[0]
-    peak2    = df['时间(s)'].iloc[peak2_idx[0]] if len(peak2_idx) else np.nan
-    total2   = round(np.trapz(arr, t_arr)/60, 2)
-    rate2    = round((arr >= base_curve).mean()*100, 2)
-    last_idx2= pos_idx[-1] if len(pos_idx) else None
-    end2     = df['时间(s)'].iloc[last_idx2] if last_idx2 is not None else np.nan
-    oxy2     = round((end2 - start2)/60, 2) if last_idx2 is not None else np.nan
-
-    perf.append({
-        '设备':            '平均值',
-        '启动时长(秒)':    round(start2, 2),
-        '达峰时长(秒)':    round(peak2, 2),
-        '累计流量(升)':    total2,
-        '达标率(%)':      rate2,
-        '产氧时间(分钟)': oxy2
+    
+    # 添加平均值
+    avg_start = np.mean([p['启动时长(秒)'] for p in performance_data if p['启动时长(秒)'] > 0])
+    avg_peak = np.mean([p['达峰时长(秒)'] for p in performance_data if p['达峰时长(秒)'] > 0])
+    avg_total = round(trapezoid(df['平均流量L/Min'], df['时间(s)'])/60, 2)
+    
+    # 平均达标率
+    avg_compliance_count = (df['平均流量L/Min'] >= df['基准流量L/Min']).sum()
+    avg_compliance = round(avg_compliance_count / total_count * 100, 2) if total_count > 0 else 0
+    
+    # 平均产氧时间
+    avg_start_idx = df[df['平均流量L/Min'] > 0].index
+    if len(avg_start_idx) > 0:
+        avg_start_time = df.loc[avg_start_idx[0], '时间(s)']
+        avg_last_idx = df[df['平均流量L/Min'] > 0].index[-1]
+        avg_last_time = df.loc[avg_last_idx, '时间(s)']
+        avg_oxygen_time = round((avg_last_time - avg_start_time) / 60, 2)
+    else:
+        avg_oxygen_time = 0
+    
+    performance_data.append({
+        '设备': '平均值',
+        '启动时长(秒)': round(avg_start, 0) if not np.isnan(avg_start) else 0,
+        '达峰时长(秒)': round(avg_peak, 0) if not np.isnan(avg_peak) else 0,
+        '累计流量(升)': avg_total,
+        '达标率(%)': avg_compliance,
+        '产氧时间(分钟)': avg_oxygen_time
     })
-    perf_df = pd.DataFrame(perf)
-
-    # 7) 异常分析（同原脚本）
-    ab_sheets = {}
-    for idx, name in enumerate([f'{i}号' for i in range(1,5)] + ['平均值']):
-        arr = df[SENSORS[idx]].values if idx < 4 else df['平均流量L/Min'].values
-        recs, st, diff = [], None, 0
-        for t, a, b in zip(df['时间(s)'], arr, base_curve):
-            if a < b:
-                if st is None: st = t
-                diff += (b - a)/60
-            else:
-                if st is not None:
-                    cum_s = round(np.trapz(
-                        df.loc[df['时间(s)'] <= st, active_sensors].sum(axis=1),
-                        df.loc[df['时间(s)'] <= st, '时间(s)'])/60, 2)
-                    cum_e = round(np.trapz(
-                        df.loc[df['时间(s)'] <= t, active_sensors].sum(axis=1),
-                        df.loc[df['时间(s)'] <= t, '时间(s)'])/60, 2)
-                    recs.append({
-                        '开始时间(秒)':      round(st, 2),
-                        '结束时间(秒)':      round(t, 2),
-                        '持续时间(秒)':      round(t - st, 2),
-                        '流量差异(升)':      round(diff, 2),
-                        '起点累积流量(升)': cum_s,
-                        '终点累积流量(升)': cum_e
-                    })
-                    st, diff = None, 0
-        if st is not None:
-            end = df['时间(s)'].iloc[-1]
-            cum_s = round(np.trapz(
-                df.loc[df['时间(s)'] <= st, active_sensors].sum(axis=1),
-                df.loc[df['时间(s)'] <= st, '时间(s)'])/60, 2)
-            cum_e = round(np.trapz(
-                df.loc[df['时间(s)'] <= end, active_sensors].sum(axis=1),
-                df.loc[df['时间(s)'] <= end, '时间(s)'])/60, 2)
-            recs.append({
-                '开始时间(秒)':      round(st, 2),
-                '结束时间(秒)':      round(end, 2),
-                '持续时间(秒)':      round(end - st, 2),
-                '流量差异(升)':      round(diff, 2),
-                '起点累积流量(升)': cum_s,
-                '终点累积流量(升)': cum_e
-            })
-        ab_sheets[name] = pd.DataFrame(recs)
-
-    # ========== 新增 平均异常分析（绝对0.9L/min阈值） ==========
-    # 窗口：7min ~ 燃尽前2min
-    win_start = 7 * 60
-    avg_arr   = df['平均流量L/Min'].values
-    ts        = df['时间(s)'].values
-
-    # 找到最后一个非零平均流量时刻作为燃尽点
-    nz = np.where(avg_arr > 0)[0]
-    burn_out_time = ts[nz[-1]] if nz.size else ts[0]
-    win_end = max(burn_out_time - 120, win_start)
-
-    # 异常判据：平均流量 < 0.9L/min（绝对值！）
-    mask = (ts >= win_start) & (ts <= win_end)
-    abnormal = (avg_arr < 0.9) & mask
-
-    exception_records = []
-    in_block = False
-    for i in range(len(ts)):
-        if abnormal[i]:
-            if not in_block:
-                block_start = ts[i]
-                start_oxy = np.trapz(avg_arr[:i+1], ts[:i+1]) / 60
-                in_block = True
-            block_end = ts[i]
-            end_oxy = np.trapz(avg_arr[:i+1], ts[:i+1]) / 60
-        else:
-            if in_block:
-                exception_records.append({
-                    "开始时间(秒)": round(block_start, 2),
-                    "结束时间(秒)": round(block_end, 2),
-                    "持续时间(秒)": round(block_end - block_start, 2),
-                    "起点累积流量(升)": round(start_oxy, 2),
-                    "终点累积流量(升)": round(end_oxy, 2),
-                })
-                in_block = False
-    if in_block:
-        exception_records.append({
-            "开始时间(秒)": round(block_start, 2),
-            "结束时间(秒)": round(block_end, 2),
-            "持续时间(秒)": round(block_end - block_start, 2),
-            "起点累积流量(升)": round(start_oxy, 2),
-            "终点累积流量(升)": round(end_oxy, 2),
-        })
-    df_avg_exception = pd.DataFrame(exception_records)
-
-    # 8) 燃烧定位表计算
-    # 计算每个时间点的累积产氧量
-    cumulative_oxygen = []
-    for i in range(len(df)):
-        sub_df = df.iloc[:i+1]
-        total_oxygen = np.trapz(sub_df[active_sensors].sum(axis=1), sub_df['时间(s)']) / 60
-        cumulative_oxygen.append(total_oxygen)
     
-    # 计算总产氧量
-    total_oxygen_production = cumulative_oxygen[-1]
+    performance_df = pd.DataFrame(performance_data)
     
-    # 根据刻度表计算燃烧深度
-    burn_location = []
-    for cum_oxy in cumulative_oxygen:
-        if total_oxygen_production > 0:
-            # 计算当前累积产氧量占总产氧量的百分比
-            percentage = cum_oxy / total_oxygen_production
+    # 9) 创建Excel写入器
+    output_file = os.path.join(OUT_DIR, f"{label}_分析报告.xlsx")
+    with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
+        workbook = writer.book
+        
+        # 9.1) 原始数据Sheet - 只包含流量数据，时间精确到0.5秒
+        raw_cols = ['时间(s)']
+        raw_cols.extend(SENSORS)
+        raw_cols.extend(['平均流量L/Min', '基准流量L/Min'])
+        
+        raw_data = df[raw_cols].copy()
+        # 确保时间列显示0.5秒精度
+        raw_data['时间(s)'] = raw_data['时间(s)'].round(1)
+        raw_data.to_excel(writer, sheet_name='原始数据', index=False)
+        
+        # 9.2) 关键点分析
+        crit = []
+        for t in KEY_TIMES:
+            sub = df[df['时间(s)'] <= t]
+            if len(sub) == 0:
+                continue
             
-            # 在刻度表中查找对应的燃烧深度
-            if percentage <= 0:
-                depth = 0
-                location = "未开始"
-            elif percentage >= 1:
-                depth = scale_df['刻度值/mm'].max()
-                location = scale_df.iloc[-1]['大致位置']
-            else:
-                # 插值计算深度
-                depth = np.interp(percentage, 
-                                scale_df['有效燃烧百分比'], 
-                                scale_df['刻度值/mm'])
-                # 查找对应位置
-                idx = np.searchsorted(scale_df['有效燃烧百分比'], percentage)
-                if idx >= len(scale_df):
-                    location = scale_df.iloc[-1]['大致位置']
+            # 找到最接近目标时间点的数据
+            closest_idx = (df['时间(s)'] - t).abs().idxmin()
+            
+            rec = {'时间点(s)': t}
+            
+            # 记录每个传感器在该时间点的瞬时流量
+            for s in active_sensors:
+                sensor_name = s.replace('瞬时流量L/Min', '')
+                rec[f'{sensor_name}瞬时流量(L/Min)'] = round(df.loc[closest_idx, s], 2)
+            
+            # 记录平均瞬时流量
+            rec['平均瞬时流量(L/Min)'] = round(df.loc[closest_idx, '平均流量L/Min'], 2)
+            
+            # 平均总流量
+            rec['平均总流量(L)'] = round(trapezoid(sub['平均流量L/Min'], sub['时间(s)'])/60, 2)
+            
+            # 基准总流量
+            xi = np.linspace(0, t, int(t*2)+1)
+            rec['基准总流量(L)'] = round(trapezoid(np.interp(xi, base_t, base_f), xi)/60, 2)
+            
+            crit.append(rec)
+        
+        if crit:
+            crit_df = pd.DataFrame(crit)
+            crit_df.to_excel(writer, sheet_name='关键点分析', index=False)
+        
+        # 9.3) 性能指标分析
+        performance_df.to_excel(writer, sheet_name='性能指标分析', index=False)
+        
+        # 9.4) 平均异常分析表（0.9阈值）
+        # 确定反应的真正结束时间：所有活跃传感器流量都不为0的最后时刻
+        actual_end_time = None
+        for idx in range(len(df)-1, -1, -1):
+            row = df.iloc[idx]
+            # 检查所有活跃传感器是否都有流量
+            all_sensors_active = all(row[sensor] > 0 for sensor in active_sensors)
+            if all_sensors_active:
+                actual_end_time = row['时间(s)']
+                break
+        
+        if actual_end_time is None:
+            print("⚠️ 未找到有效的反应结束时间")
+            actual_end_time = df['时间(s)'].iloc[-1]  # 使用最后时间作为备选
+        
+        # 窗口时间：从反应开始7分钟后到反应结束前2分钟
+        window_start = 7 * 60  # 7分钟 = 420秒
+        window_end = actual_end_time - 2 * 60  # 实际结束前2分钟
+        
+        print(f"\n=== 0.9阈值异常分析 ===")
+        print(f"数据采集时间: 0秒 到 {df['时间(s)'].iloc[-1]:.1f}秒")
+        print(f"反应实际结束时间: {actual_end_time:.1f}秒 ({actual_end_time/60:.2f}分钟)")
+        print(f"窗口范围: {window_start:.1f}秒 到 {window_end:.1f}秒")
+        
+        if window_end > window_start:
+            # 创建一个新的DataFrame只包含窗口内的数据
+            window_mask = (df['时间(s)'] >= window_start) & (df['时间(s)'] <= window_end)
+            window_df = df[window_mask].copy()
+            
+            if len(window_df) > 0:
+                window_df = window_df.reset_index(drop=True)
+                print(f"窗口内数据点数: {len(window_df)}")
+                
+                # 判断平均流量低于0.9 L/min的时段
+                window_df['低于阈值'] = window_df['平均流量L/Min'] < 0.9
+                
+                # 找出所有异常时间段
+                avg_vio_records = []
+                in_violation = False
+                start_idx = None
+                
+                for i in range(len(window_df)):
+                    current_time = window_df.iloc[i]['时间(s)']
+                    current_below = window_df.iloc[i]['低于阈值']
+                    
+                    if current_below and not in_violation:
+                        in_violation = True
+                        start_idx = i
+                    elif not current_below and in_violation:
+                        in_violation = False
+                        if start_idx is not None:
+                            # 记录异常段
+                            start_time = window_df.iloc[start_idx]['时间(s)']
+                            end_time = window_df.iloc[i-1]['时间(s)']
+                            
+                            # 计算累积流量
+                            start_cumul = round(trapezoid(
+                                df[df['时间(s)'] <= start_time]['平均流量L/Min'],
+                                df[df['时间(s)'] <= start_time]['时间(s)']
+                            )/60, 2)
+                            
+                            end_cumul = round(trapezoid(
+                                df[df['时间(s)'] <= end_time]['平均流量L/Min'],
+                                df[df['时间(s)'] <= end_time]['时间(s)']
+                            )/60, 2)
+                            
+                            avg_vio_records.append({
+                                '开始时间(秒)': round(start_time, 0),
+                                '结束时间(秒)': round(end_time, 0),
+                                '持续时间(秒)': round(end_time - start_time, 0),
+                                '起点累积流量(升)': start_cumul,
+                                '终点累积流量(升)': end_cumul
+                            })
+                            print(f"记录异常: {start_time:.1f}s - {end_time:.1f}s")
+                        start_idx = None
+                
+                # 处理最后的异常段（如果在窗口内结束）
+                if in_violation and start_idx is not None:
+                    start_time = window_df.iloc[start_idx]['时间(s)']
+                    end_time = window_df.iloc[-1]['时间(s)']
+                    
+                    # 只有当异常完全在窗口内时才记录
+                    if end_time <= window_end:
+                        start_cumul = round(trapezoid(
+                            df[df['时间(s)'] <= start_time]['平均流量L/Min'],
+                            df[df['时间(s)'] <= start_time]['时间(s)']
+                        )/60, 2)
+                        
+                        end_cumul = round(trapezoid(
+                            df[df['时间(s)'] <= end_time]['平均流量L/Min'],
+                            df[df['时间(s)'] <= end_time]['时间(s)']
+                        )/60, 2)
+                        
+                        avg_vio_records.append({
+                            '开始时间(秒)': round(start_time, 0),
+                            '结束时间(秒)': round(end_time, 0),
+                            '持续时间(秒)': round(end_time - start_time, 0),
+                            '起点累积流量(升)': start_cumul,
+                            '终点累积流量(升)': end_cumul
+                        })
+                        print(f"记录最后异常: {start_time:.1f}s - {end_time:.1f}s")
+                
+                if avg_vio_records:
+                    print(f"\n✅ 共找到 {len(avg_vio_records)} 个窗口内的异常时段")
+                    avg_vio_df = pd.DataFrame(avg_vio_records)
+                    avg_vio_df.to_excel(writer, sheet_name='平均异常分析表_0.9阈值', index=False)
                 else:
-                    location = scale_df.iloc[idx]['大致位置']
+                    print("\n窗口内未发现异常")
+            else:
+                print("窗口内无数据")
         else:
-            depth = 0
-            location = "未开始"
+            print("窗口时间无效（反应时间太短）")
         
-        burn_location.append({
-            '时间(s)': df['时间(s)'].iloc[len(burn_location)],
-            '产氧量(L)': round(cum_oxy, 2),
-            '燃烧深度(mm)': round(depth, 2),
-            '大致位置': location
-        })
-    
-    burn_location_df = pd.DataFrame(burn_location)
-    
-    # 选择关键时间点的燃烧定位信息
-    key_burn_location = []
-    for t in [0, 60, 120, 300, 600, 900, 1200]:
-        if t <= df['时间(s)'].max():
-            idx = (df['时间(s)'] - t).abs().argmin()
-            key_burn_location.append(burn_location[idx])
-    key_burn_location_df = pd.DataFrame(key_burn_location)
-
-    # 9) 写入 Excel & 插入曲线图
-    out_file = os.path.join(OUT_DIR, f"{label}_分析报告.xlsx")
-    with pd.ExcelWriter(out_file, engine='xlsxwriter') as writer:
-        raw_data.to_excel(writer, '原始数据', index=False)
-        crit_df.to_excel(writer, '关键点分析', index=False)
-        perf_df.to_excel(writer, '性能指标分析', index=False)
-        key_burn_location_df.to_excel(writer, '燃烧定位表', index=False)
-        # ...已有写入...
-        df_avg_exception.to_excel(writer, '平均异常分析表_0.9阈值', index=False) 
-
-        for name, df_ab in ab_sheets.items():
-            sheet = f'异常分析_{name}'
-            df_ab.to_excel(writer, sheet, index=False)
-            ws = writer.sheets[sheet]
-            ws.write(len(df_ab) + 2, 0, NOTE_TEXT)
-
-        wb       = writer.book
+        # 9.5) 各传感器异常分析
+        for sensor in active_sensors:
+            sensor_name = sensor.replace('瞬时流量L/Min', '')
+            
+            # 判断低于基准的时间段
+            df['低于基准'] = df[sensor] < df['基准流量L/Min']
+            
+            # 找出所有不达标时间段
+            violations = []
+            in_violation = False
+            start_idx = None
+            
+            for idx in range(len(df)):
+                if df.iloc[idx]['低于基准'] and not in_violation:
+                    in_violation = True
+                    start_idx = idx
+                elif not df.iloc[idx]['低于基准'] and in_violation:
+                    in_violation = False
+                    if start_idx is not None:
+                        violations.append((start_idx, idx - 1))
+                    start_idx = None
+            
+            # 如果最后还在违规中
+            if in_violation and start_idx is not None:
+                violations.append((start_idx, len(df) - 1))
+            
+            # 分析每个不达标时间段
+            vio_records = []
+            for start, end in violations:
+                sub = df.iloc[start:end+1]
+                if len(sub) < 2:
+                    continue
+                
+                # 计算流量差异（异常期间低于基准的累积差值）
+                diff = sub['基准流量L/Min'] - sub[sensor]
+                flow_diff = round(trapezoid(np.maximum(diff, 0), sub['时间(s)'])/60, 2)
+                
+                # 累积流量
+                start_cumul = round(trapezoid(
+                    df[df['时间(s)'] <= sub['时间(s)'].iloc[0]][sensor],
+                    df[df['时间(s)'] <= sub['时间(s)'].iloc[0]]['时间(s)']
+                )/60, 2)
+                
+                end_cumul = round(trapezoid(
+                    df[df['时间(s)'] <= sub['时间(s)'].iloc[-1]][sensor],
+                    df[df['时间(s)'] <= sub['时间(s)'].iloc[-1]]['时间(s)']
+                )/60, 2)
+                
+                vio_records.append({
+                    '开始时间(秒)': round(sub['时间(s)'].iloc[0], 0),
+                    '结束时间(秒)': round(sub['时间(s)'].iloc[-1], 0),
+                    '持续时间(秒)': round(sub['时间(s)'].iloc[-1] - sub['时间(s)'].iloc[0], 0),
+                    '流量差异(升)': flow_diff,
+                    '起点累积流量(升)': start_cumul,
+                    '终点累积流量(升)': end_cumul
+                })
+            
+            if vio_records:
+                vio_df = pd.DataFrame(vio_records)
+                sheet_name = f'异常分析_{sensor_name}'
+                vio_df.to_excel(writer, sheet_name=sheet_name, index=False)
         
-        # 原始曲线图
-        chart_ws = wb.add_worksheet('曲线图')
-        chart    = wb.add_chart({'type': 'line'})
-        n        = len(raw_data)
-        for i in range(1, len(raw_cols)):
-            chart.add_series({
-                'name':       ['原始数据', 0, i],
-                'categories': ['原始数据', 1, 0, n, 0],
-                'values':     ['原始数据', 1, i, n, i],
+        # 9.6) 异常分析_平均值
+        # 使用平均流量进行异常分析
+        df['低于基准'] = df['平均流量L/Min'] < df['基准流量L/Min']
+        
+        # 找出所有不达标时间段
+        violations = []
+        in_violation = False
+        start_idx = None
+        
+        for idx in range(len(df)):
+            if df.iloc[idx]['低于基准'] and not in_violation:
+                in_violation = True
+                start_idx = idx
+            elif not df.iloc[idx]['低于基准'] and in_violation:
+                in_violation = False
+                if start_idx is not None:
+                    violations.append((start_idx, idx - 1))
+                start_idx = None
+        
+        # 如果最后还在违规中
+        if in_violation and start_idx is not None:
+            violations.append((start_idx, len(df) - 1))
+        
+        # 分析每个不达标时间段
+        vio_records = []
+        for start, end in violations:
+            sub = df.iloc[start:end+1]
+            if len(sub) < 2:
+                continue
+            
+            # 计算流量差异
+            diff = sub['基准流量L/Min'] - sub['平均流量L/Min']
+            flow_diff = round(trapezoid(np.maximum(diff, 0), sub['时间(s)'])/60, 2)
+            
+            # 累积流量
+            start_cumul = round(trapezoid(
+                df[df['时间(s)'] <= sub['时间(s)'].iloc[0]]['平均流量L/Min'],
+                df[df['时间(s)'] <= sub['时间(s)'].iloc[0]]['时间(s)']
+            )/60, 2)
+            
+            end_cumul = round(trapezoid(
+                df[df['时间(s)'] <= sub['时间(s)'].iloc[-1]]['平均流量L/Min'],
+                df[df['时间(s)'] <= sub['时间(s)'].iloc[-1]]['时间(s)']
+            )/60, 2)
+            
+            vio_records.append({
+                '开始时间(秒)': round(sub['时间(s)'].iloc[0], 0),
+                '结束时间(秒)': round(sub['时间(s)'].iloc[-1], 0),
+                '持续时间(秒)': round(sub['时间(s)'].iloc[-1] - sub['时间(s)'].iloc[0], 0),
+                '流量差异(升)': flow_diff,
+                '起点累积流量(升)': start_cumul,
+                '终点累积流量(升)': end_cumul
             })
-        chart.set_x_axis({'name': '时间(s)'})
-        chart.set_y_axis({'name': '流量(L/Min)'})
-        chart.set_title({'name': '流量时序曲线'})
-        chart_ws.insert_chart('B2', chart, {'x_scale': 1.2, 'y_scale': 1.2})
         
-        # 产氧-深度双坐标曲线图
-        depth_ws = wb.add_worksheet('产氧-深度曲线')
+        if vio_records:
+            vio_df = pd.DataFrame(vio_records)
+            vio_df.to_excel(writer, sheet_name='异常分析_平均值', index=False)
         
-        # 为产氧-深度曲线准备数据
-        burn_location_df.to_excel(writer, '燃烧定位数据', index=False)
+        # 9.7) 燃烧定位表
+        if not scale_df.empty:
+            # 首先计算总产氧量
+            total_oxygen = round(trapezoid(df['平均流量L/Min'], df['时间(s)'])/60, 2)
+            
+            # 燃烧定位数据
+            burn_data = []
+            for idx, row in df.iterrows():
+                t = row['时间(s)']
+                # 计算累积产氧量
+                sub = df[df['时间(s)'] <= t]
+                oxygen_produced = round(trapezoid(sub['平均流量L/Min'], sub['时间(s)'])/60, 2)
+                
+                # 计算累积产氧量占总产氧量的百分比
+                if total_oxygen > 0:
+                    oxygen_percentage = oxygen_produced / total_oxygen
+                else:
+                    oxygen_percentage = 0
+                
+                # 根据百分比在刻度表中插值计算燃烧深度
+                depth = 0
+                position = "未开始"
+                
+                if '有效燃烧百分比' in scale_df.columns and '刻度值/mm' in scale_df.columns:
+                    # 获取刻度表数据（排除表头）
+                    scale_data = scale_df[scale_df['有效燃烧百分比'].notna()].copy()
+                    
+                    if len(scale_data) > 0 and oxygen_percentage > 0:
+                        # 使用插值计算燃烧深度
+                        percentages = scale_data['有效燃烧百分比'].values
+                        depths = scale_data['刻度值/mm'].values
+                        
+                        # 如果百分比超出范围，使用边界值
+                        if oxygen_percentage <= percentages.min():
+                            depth = depths[0]
+                        elif oxygen_percentage >= percentages.max():
+                            depth = depths[-1]
+                        else:
+                            # 线性插值
+                            depth = np.interp(oxygen_percentage, percentages, depths)
+                        
+                        depth = round(depth, 1)
+                        
+                        # 根据深度确定位置
+                        # 查找最接近的刻度值对应的位置
+                        closest_idx = np.abs(scale_data['刻度值/mm'] - depth).idxmin()
+                        if '大致位置' in scale_data.columns:
+                            position = scale_data.loc[closest_idx, '大致位置']
+                
+                elif oxygen_produced > 0:
+                    # 如果没有有效燃烧百分比列，使用简单的线性估算
+                    # 假设总深度200mm
+                    depth = round(oxygen_percentage * 200, 1)
+                    if depth < 50:
+                        position = "A、B层"
+                    elif depth < 100:
+                        position = "C1层"
+                    elif depth < 150:
+                        position = "C2层"
+                    else:
+                        position = "C3层"
+                
+                burn_data.append({
+                    '时间(s)': round(t, 0),
+                    '产氧量(L)': oxygen_produced,
+                    '燃烧深度(mm)': depth,
+                    '大致位置': position
+                })
+            
+            # 创建燃烧定位表（关键时间点）
+            key_times = [0, 60, 120, 180, 240, 300, 360, 600, 900, 1200]
+            key_burn_data = []
+            
+            for t in key_times:
+                # 找到最接近的时间点
+                if t == 0:
+                    key_burn_data.append(burn_data[0])
+                else:
+                    # 考虑0.5秒采样，找到最接近的索引
+                    target_idx = int(t * 2)  # t秒对应的索引（0.5秒采样）
+                    if target_idx < len(burn_data):
+                        key_burn_data.append(burn_data[target_idx])
+                    elif len(burn_data) > 0:
+                        # 如果超出范围，使用最后一个数据
+                        key_burn_data.append(burn_data[-1])
+            
+            burn_df = pd.DataFrame(key_burn_data)
+            burn_df.to_excel(writer, sheet_name='燃烧定位表', index=False)
+            
+            # 完整的燃烧定位数据
+            full_burn_df = pd.DataFrame(burn_data)
+            full_burn_df.to_excel(writer, sheet_name='燃烧定位数据', index=False)
         
-        # 创建双坐标图
-        combo_chart = wb.add_chart({'type': 'line'})
+        # 9.8) 创建曲线图Sheet - 显示所有传感器流量曲线
+        # 为图表数据创建每秒一个点的数据（用于图表显示）
+        # 只选择整数秒的数据点
+        chart_data = df[df['时间(s)'] % 1 == 0].copy()
         
-        # 累积产氧量曲线（左Y轴）
-        combo_chart.add_series({
-            'name':       '累积产氧量',
-            'categories': ['燃烧定位数据', 1, 0, len(burn_location_df), 0],
-            'values':     ['燃烧定位数据', 1, 1, len(burn_location_df), 1],
-            'line':       {'color': 'blue', 'width': 2},
+        # 如果没有整数秒的数据，则取最接近整数秒的数据
+        if len(chart_data) == 0:
+            # 创建整数秒的时间点
+            max_time = int(df['时间(s)'].max())
+            time_points = list(range(0, max_time + 1))
+            
+            chart_rows = []
+            for t in time_points:
+                # 找到最接近这个整数秒的数据点
+                closest_idx = (df['时间(s)'] - t).abs().idxmin()
+                row_data = df.loc[closest_idx].copy()
+                row_data['时间(s)'] = t  # 设置为整数秒
+                chart_rows.append(row_data)
+            
+            chart_data = pd.DataFrame(chart_rows)
+        
+        # 创建流量曲线图数据
+        chart_cols = ['时间(s)']
+        chart_cols.extend(active_sensors)  # 添加活跃的传感器列
+        chart_cols.extend(['平均流量L/Min', '基准流量L/Min'])
+        
+        chart_df = chart_data[chart_cols].copy()
+        # 确保时间是整数
+        chart_df['时间(s)'] = chart_df['时间(s)'].astype(int)
+        chart_df.to_excel(writer, sheet_name='曲线图', index=False)
+        
+        # 在Excel中创建流量曲线图表
+        worksheet = writer.sheets['曲线图']
+        
+        # 创建流量图表
+        chart1 = workbook.add_chart({'type': 'line'})
+        
+        # 添加各个传感器的流量曲线
+        colors = ['blue', 'green', 'orange', 'purple']
+        for i, sensor in enumerate(active_sensors):
+            sensor_name = sensor.replace('瞬时流量L/Min', '')
+            chart1.add_series({
+                'name': f'{sensor_name}流量',
+                'categories': ['曲线图', 1, 0, len(chart_df), 0],  # 时间列
+                'values': ['曲线图', 1, i+1, len(chart_df), i+1],  # 传感器流量列
+                'line': {'color': colors[i], 'width': 1.5}
+            })
+        
+        # 添加平均流量系列
+        chart1.add_series({
+            'name': '平均流量',
+            'categories': ['曲线图', 1, 0, len(chart_df), 0],
+            'values': ['曲线图', 1, len(active_sensors)+1, len(chart_df), len(active_sensors)+1],
+            'line': {'color': 'black', 'width': 2.5}
         })
         
-        # 燃烧深度曲线（右Y轴）
-        combo_chart.add_series({
-            'name':       '燃烧深度',
-            'categories': ['燃烧定位数据', 1, 0, len(burn_location_df), 0],
-            'values':     ['燃烧定位数据', 1, 2, len(burn_location_df), 2],
-            'y2_axis':    True,
-            'line':       {'color': 'red', 'width': 2},
+        # 添加基准流量系列
+        chart1.add_series({
+            'name': '基准流量',
+            'categories': ['曲线图', 1, 0, len(chart_df), 0],
+            'values': ['曲线图', 1, len(active_sensors)+2, len(chart_df), len(active_sensors)+2],
+            'line': {'color': 'red', 'width': 2.5, 'dash_type': 'dash'}
         })
         
-        combo_chart.set_x_axis({
-            'name': '时间(s)',
-            'min': 0,
-            'max': 1200,
-        })
-        combo_chart.set_y_axis({
-            'name': '累积产氧量(L)',
-            'min': 0,
-        })
-        combo_chart.set_y2_axis({
-            'name': '燃烧深度(mm)',
-            'min': 0,
-            'max': scale_df['刻度值/mm'].max(),
-        })
-        combo_chart.set_title({'name': f'产氧-深度曲线 ({mode})'})
-        combo_chart.set_size({'width': 720, 'height': 480})
+        # 设置图表属性
+        chart1.set_title({'name': '流量曲线对比图'})
+        chart1.set_x_axis({'name': '时间 (秒)'})
+        chart1.set_y_axis({'name': '流量 (L/Min)'})
+        chart1.set_size({'width': 720, 'height': 480})
+        worksheet.insert_chart('H2', chart1)
         
-        depth_ws.insert_chart('B2', combo_chart)
+        # 9.9) 创建流量-温度综合分析图（如果有温度数据）
+        if temperature_data is not None:
+            print("创建流量-温度综合分析图...")
+            
+            # 创建综合分析数据
+            temp_chart_cols = ['时间(s)', '平均流量L/Min', 'CH1温度', 'CH2温度', 'CH3温度']
+            
+            # 检查是否所有列都存在
+            missing_cols = [col for col in temp_chart_cols if col not in chart_data.columns]
+            if missing_cols:
+                print(f"警告：缺少列 {missing_cols}")
+                # 只使用存在的列
+                temp_chart_cols = [col for col in temp_chart_cols if col in chart_data.columns]
+            
+            if len(temp_chart_cols) >= 2:  # 至少需要时间和一个数据列
+                temp_chart_df = chart_data[temp_chart_cols].copy()
+                temp_chart_df['时间(s)'] = temp_chart_df['时间(s)'].astype(int)
+                temp_chart_df.to_excel(writer, sheet_name='流量-温度综合分析', index=False)
+                
+                # 创建综合图表
+                worksheet_temp = writer.sheets['流量-温度综合分析']
+                chart3 = workbook.add_chart({'type': 'line'})
+                
+                # 添加平均流量系列（左侧Y轴）
+                if '平均流量L/Min' in temp_chart_df.columns:
+                    chart3.add_series({
+                        'name': '平均流量',
+                        'categories': ['流量-温度综合分析', 1, 0, len(temp_chart_df), 0],
+                        'values': ['流量-温度综合分析', 1, 1, len(temp_chart_df), 1],
+                        'line': {'color': 'blue', 'width': 2.5}
+                    })
+                
+                # 添加温度系列（右侧Y轴）
+                temp_colors = ['red', 'green', 'orange']
+                temp_names = ['CH1温度', 'CH2温度', 'CH3温度']
+                col_idx = 2  # 从第3列开始（索引2）
+                
+                for name, color in zip(temp_names, temp_colors):
+                    if name in temp_chart_df.columns:
+                        chart3.add_series({
+                            'name': name,
+                            'categories': ['流量-温度综合分析', 1, 0, len(temp_chart_df), 0],
+                            'values': ['流量-温度综合分析', 1, col_idx, len(temp_chart_df), col_idx],
+                            'line': {'color': color, 'width': 2},
+                            'y2_axis': True  # 右侧Y轴
+                        })
+                        col_idx += 1
+                
+                # 设置图表属性
+                chart3.set_title({'name': '流量-温度综合分析图'})
+                chart3.set_x_axis({'name': '时间 (秒)'})
+                chart3.set_y_axis({'name': '流量 (L/Min)', 'major_gridlines': {'visible': True}})
+                chart3.set_y2_axis({'name': '温度 (°C)'})
+                chart3.set_size({'width': 720, 'height': 480})
+                worksheet_temp.insert_chart('G2', chart3)
+                
+                print("✅ 流量-温度综合分析图创建成功")
+            else:
+                print("⚠️ 数据不足，无法创建流量-温度综合分析图")
+        else:
+            print("⚠️ 无温度数据，跳过流量-温度综合分析图")
         
-        # 在第一个工作表中添加模式说明
-        ws_info = writer.sheets['原始数据']
-        ws_info.write(len(raw_data) + 2, 0, f'检测模式: {mode}')
+        # 9.10) 产氧-深度曲线
+        if 'burn_data' in locals() and len(burn_data) > 0:
+            # 创建产氧深度数据（每10秒一个点）
+            depth_data = []
+            for i in range(0, len(burn_data), 20):  # 每10秒取一个点（0.5秒采样）
+                depth_data.append(burn_data[i])
+            
+            depth_df = pd.DataFrame(depth_data)
+            depth_df.to_excel(writer, sheet_name='产氧-深度曲线', index=False)
+            
+            # 创建深度图表
+            worksheet_depth = writer.sheets['产氧-深度曲线']
+            chart2 = workbook.add_chart({'type': 'line'})
+            
+            # 添加产氧量系列（左侧Y轴）
+            chart2.add_series({
+                'name': '产氧量',
+                'categories': ['产氧-深度曲线', 1, 0, len(depth_df), 0],  # 时间列
+                'values': ['产氧-深度曲线', 1, 1, len(depth_df), 1],     # 产氧量列
+                'line': {'color': 'blue', 'width': 2},
+                'y_axis': 1  # 左侧Y轴
+            })
+            
+            # 添加燃烧深度系列（右侧Y轴）
+            chart2.add_series({
+                'name': '燃烧深度',
+                'categories': ['产氧-深度曲线', 1, 0, len(depth_df), 0],  # 时间列
+                'values': ['产氧-深度曲线', 1, 2, len(depth_df), 2],     # 深度列
+                'line': {'color': 'red', 'width': 2},
+                'y2_axis': True  # 右侧Y轴
+            })
+            
+            chart2.set_title({'name': '产氧量-燃烧深度关系图'})
+            chart2.set_x_axis({'name': '时间 (秒)'})
+            chart2.set_y_axis({'name': '产氧量 (L)', 'major_gridlines': {'visible': True}})
+            chart2.set_y2_axis({'name': '燃烧深度 (mm)'})
+            chart2.set_size({'width': 720, 'height': 480})
+            worksheet_depth.insert_chart('E2', chart2)
+    
+    print(f"✅ 生成报告: {output_file}")
 
-print("✅ 全部报告已生成至:", OUT_DIR)
+print(f"\n{'='*50}")
+print(f"所有报告生成完成！")
+print(f"输出目录: {OUT_DIR}")
+print(f"{'='*50}")
