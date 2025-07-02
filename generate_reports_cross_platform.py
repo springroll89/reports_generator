@@ -95,15 +95,7 @@ def calculate_cumulative_flow(df, active_sensors):
     cumulative = np.cumsum(total_flow.values * 0.5 / 60)
     return cumulative
 
-def find_reaction_end_time(df):
-    """找到反应结束时间（平均流量最后一次大于0的时间）"""
-    nonzero_mask = df['平均流量L/Min'] > 0
-    if nonzero_mask.any():
-        last_nonzero_idx = df[nonzero_mask].index[-1]
-        return df.loc[last_nonzero_idx, '时间(s)']
-    return df['时间(s)'].iloc[-1]
-
-def find_stable_period(df, cumulative_flow):
+def find_stable_period(df, cumulative_flow, reaction_end_time):
     """确定平稳期边界
     平稳期起点：所有活跃传感器的总产氧量达到20L
     平稳期终点：反应结束前120秒
@@ -117,10 +109,7 @@ def find_stable_period(df, cumulative_flow):
     start_idx = start_indices[0]
     start_time = df.iloc[start_idx]['时间(s)']
     
-    # 找到反应结束时间
-    reaction_end_time = find_reaction_end_time(df)
-    
-    # 平稳期终点：反应结束前120秒
+    # 平稳期终点：反应结束前120秒（使用传入的反应结束时间）
     end_time = reaction_end_time - 120
     
     if end_time <= start_time:
@@ -415,6 +404,40 @@ for path in files:
     df['平均流量L/Min'] = df[active_sensors].mean(axis=1)
     df['基准流量L/Min'] = np.interp(df['时间(s)'], base_t, base_f)
     
+    # 6.5) 统一定义反应起止时间
+    # 反应开始时间：固定为0秒（数据采集开始）
+    REACTION_START_TIME = 0.0
+    
+    # 反应结束时间：平均流量最后一次大于0的时刻
+    nonzero_mask = df['平均流量L/Min'] > 0
+    if nonzero_mask.any():
+        REACTION_END_TIME = df[nonzero_mask]['时间(s)'].iloc[-1]
+    else:
+        REACTION_END_TIME = df['时间(s)'].iloc[-1]
+    
+    # 反应总时长（秒）
+    REACTION_DURATION = REACTION_END_TIME - REACTION_START_TIME
+    
+    print(f"\n✅ 反应时间定义：")
+    print(f"   - 开始时间: {REACTION_START_TIME}秒")
+    print(f"   - 结束时间: {REACTION_END_TIME:.1f}秒")
+    print(f"   - 反应时长: {REACTION_DURATION:.1f}秒 ({REACTION_DURATION/60:.2f}分钟)")
+    
+    # 6.6) 截断数据 - 去掉反应结束后的无效数据
+    # 保存原始数据长度信息
+    original_length = len(df)
+    original_end_time = df['时间(s)'].iloc[-1]
+    
+    # 截断数据框，只保留到反应结束时间的数据
+    # 找到最接近反应结束时间的索引
+    end_index = df[df['时间(s)'] <= REACTION_END_TIME].index[-1]
+    df = df.loc[:end_index].copy()
+    
+    # 打印截断信息
+    if len(df) < original_length:
+        print(f"✅ 数据截断：原始数据 {original_length} 个点（到 {original_end_time:.1f}秒），截断后 {len(df)} 个点（到 {df['时间(s)'].iloc[-1]:.1f}秒）")
+        print(f"   - 删除了 {original_length - len(df)} 个无效数据点")
+    
     # 7) 对齐温度数据
     if temperature_data is not None:
         flow_length = len(df)
@@ -446,21 +469,25 @@ for path in files:
         print(f"✅ 温度数据对齐完成")
     
     # 8) 计算累积流量（用于平稳性分析）- 基于所有活跃传感器的总流量
+    # 注意：此时数据已经截断，只包含有效反应时间内的数据
     cumulative_flow = calculate_cumulative_flow(df, active_sensors)
     df['累积总流量L'] = cumulative_flow
     
     # 9) 性能指标分析
     performance_data = []
     for sensor in active_sensors:
-        # 启动时长：从开始采集到流量大于零的第一个时间点
+        # 启动时长：从反应开始（0秒）到流量大于零的第一个时间点
         start_idx = df[df[sensor] > 0].index
-        start_time = df.loc[start_idx[0], '时间(s)'] if len(start_idx) > 0 else np.nan
+        if len(start_idx) > 0:
+            start_time = df.loc[start_idx[0], '时间(s)'] - REACTION_START_TIME
+        else:
+            start_time = np.nan
         
         # 达峰时长：流量首次达到3.75 L/min的时间
         peak_idx = df[df[sensor] >= 3.75].index
         peak_time = df.loc[peak_idx[0], '时间(s)'] if len(peak_idx) > 0 else np.nan
         
-        # 累计流量：对时间和流量的积分
+        # 累计流量：对时间和流量的积分（整个反应期间）
         total_flow = round(trapezoid(df[sensor], df['时间(s)'])/60, 2)
         
         # 达标率：流量大于等于基准曲线的部分占总时间的比例
@@ -468,13 +495,8 @@ for path in files:
         total_count = len(df)
         compliance_rate = round(compliance_count / total_count * 100, 2) if total_count > 0 else 0
         
-        # 产氧时间：从启动时长到流量最后大于零的时刻
-        if not np.isnan(start_time):
-            last_nonzero_idx = df[df[sensor] > 0].index[-1] if len(df[df[sensor] > 0]) > 0 else 0
-            last_time = df.loc[last_nonzero_idx, '时间(s)']
-            oxygen_time = round((last_time - start_time) / 60, 2)
-        else:
-            oxygen_time = 0
+        # 产氧时间：整个反应时长（使用统一定义）
+        oxygen_time = round(REACTION_DURATION / 60, 2)
         
         performance_data.append({
             '设备': sensor.replace('瞬时流量L/Min', ''),
@@ -494,15 +516,8 @@ for path in files:
     avg_compliance_count = (df['平均流量L/Min'] >= df['基准流量L/Min']).sum()
     avg_compliance = round(avg_compliance_count / total_count * 100, 2) if total_count > 0 else 0
     
-    # 平均产氧时间
-    avg_start_idx = df[df['平均流量L/Min'] > 0].index
-    if len(avg_start_idx) > 0:
-        avg_start_time = df.loc[avg_start_idx[0], '时间(s)']
-        avg_last_idx = df[df['平均流量L/Min'] > 0].index[-1]
-        avg_last_time = df.loc[avg_last_idx, '时间(s)']
-        avg_oxygen_time = round((avg_last_time - avg_start_time) / 60, 2)
-    else:
-        avg_oxygen_time = 0
+    # 平均产氧时间（使用统一定义）
+    avg_oxygen_time = round(REACTION_DURATION / 60, 2)
     
     performance_data.append({
         '设备': '平均值',
@@ -533,6 +548,10 @@ for path in files:
         # 10.2) 关键点分析
         crit = []
         for t in KEY_TIMES:
+            # 只分析在反应时间范围内的关键点
+            if t > REACTION_END_TIME:
+                continue
+                
             sub = df[df['时间(s)'] <= t]
             if len(sub) == 0:
                 continue
@@ -607,8 +626,8 @@ for path in files:
                 mask = df['时间(s)'] <= peak_end_time
                 peak_end_oxygen = round(trapezoid(df[mask][sensor], df[mask]['时间(s)'])/60, 2)
             
-            # 反应总时长（转换为秒）
-            total_reaction_time = round(perf_data['产氧时间(分钟)'] * 60, 0)
+            # 反应总时长（使用统一定义）
+            total_reaction_time = round(REACTION_DURATION, 0)
             
             # 总累积供氧
             total_oxygen = perf_data['累计流量(升)']
@@ -659,7 +678,7 @@ for path in files:
             '达峰时长(秒)': avg_perf_data['达峰时长(秒)'],
             '峰值维持时长(秒)': avg_peak_duration,
             '从启动到峰值结束供氧总量(升)': avg_peak_end_oxygen,
-            '反应总时长(秒)': round(avg_perf_data['产氧时间(分钟)'] * 60, 0),
+            '反应总时长(秒)': round(REACTION_DURATION, 0),
             '总累积供氧(升)': avg_perf_data['累计流量(升)']
         })
         
@@ -680,8 +699,8 @@ for path in files:
                 total_peak_end_oxygen += trapezoid(df[mask][sensor], df[mask]['时间(s)'])/60
             total_peak_end_oxygen = round(total_peak_end_oxygen, 2)
         
-        # 反应总时长（使用平均值的产氧时间）
-        total_reaction = round(avg_perf_data['产氧时间(分钟)'] * 60, 0)
+        # 反应总时长（使用统一定义）
+        total_reaction = round(REACTION_DURATION, 0)
         
         # 总累积供氧（所有传感器的总和）
         total_cumulative = round(sum([d['总累积供氧(升)'] for d in ignition_test_data[:-1]]), 2)
@@ -709,8 +728,8 @@ for path in files:
         print("\n=== 平稳性分析 ===")
         print(f"活跃传感器数量: {len(active_sensors)}")
         
-        # 确定平稳期边界
-        start_time, end_time = find_stable_period(df, cumulative_flow)
+        # 确定平稳期边界（传入反应结束时间）
+        start_time, end_time = find_stable_period(df, cumulative_flow, REACTION_END_TIME)
         
         if start_time is not None and end_time is not None:
             print(f"平稳期起点: {start_time:.1f}秒 (总产氧量达到20L)")
@@ -834,7 +853,7 @@ for path in files:
             
             # 创建图表数据
             # 准备完整的数据（每秒一个点）
-            max_time = int(df['时间(s)'].max())
+            max_time = int(REACTION_END_TIME)  # 使用反应结束时间
             time_points = np.arange(0, max_time + 1, 1)
             
             # 创建图表数据
@@ -934,7 +953,7 @@ for path in files:
                 })
             
             # 3. 平稳期后的灰色曲线（如果存在）- 后添加，不设置名称
-            if end_time < max_time:
+            if end_time < REACTION_END_TIME:
                 # 平均流量 - 平稳期后
                 chart.add_series({
                     'categories': ['平稳性分析', chart_start_row + 1, 0, chart_start_row + data_rows - 1, 0],
@@ -956,8 +975,8 @@ for path in files:
             chart.set_x_axis({
                 'name': '时间 (秒)', 
                 'min': 0, 
-                'max': max_time,
-                'major_unit': max(100, int(max_time/10))  # 动态设置主刻度间隔
+                'max': REACTION_END_TIME,
+                'major_unit': max(100, int(REACTION_END_TIME/10))  # 动态设置主刻度间隔
             })
             chart.set_y_axis({'name': '流量 (L/Min)', 'min': 0})
             chart.set_size({'width': 750, 'height': 450})
@@ -965,9 +984,9 @@ for path in files:
             # 设置图例，只显示前3个系列
             chart.set_legend({
                 'position': 'right',
-                'delete_series': [3, 4, 5, 6] if start_time > 0 and end_time < max_time else
+                'delete_series': [3, 4, 5, 6] if start_time > 0 and end_time < REACTION_END_TIME else
                                  [3, 4] if start_time > 0 else
-                                 [3, 4] if end_time < max_time else
+                                 [3, 4] if end_time < REACTION_END_TIME else
                                  []
             })
             
@@ -979,27 +998,13 @@ for path in files:
             print("\n❌ 无法进行平稳性分析")
         
         # 10.5) 平均异常分析表（0.9阈值）
-        # 确定反应的真正结束时间：所有活跃传感器流量都不为0的最后时刻
-        actual_end_time = None
-        for idx in range(len(df)-1, -1, -1):
-            row = df.iloc[idx]
-            # 检查所有活跃传感器是否都有流量
-            all_sensors_active = all(row[sensor] > 0 for sensor in active_sensors)
-            if all_sensors_active:
-                actual_end_time = row['时间(s)']
-                break
-        
-        if actual_end_time is None:
-            print("⚠️ 未找到有效的反应结束时间")
-            actual_end_time = df['时间(s)'].iloc[-1]  # 使用最后时间作为备选
-        
         # 窗口时间：从反应开始7分钟后到反应结束前2分钟
         window_start = 7 * 60  # 7分钟 = 420秒
-        window_end = actual_end_time - 2 * 60  # 实际结束前2分钟
+        window_end = REACTION_END_TIME - 2 * 60  # 使用统一定义的反应结束时间
         
         print(f"\n=== 0.9阈值异常分析 ===")
         print(f"数据采集时间: 0秒 到 {df['时间(s)'].iloc[-1]:.1f}秒")
-        print(f"反应实际结束时间: {actual_end_time:.1f}秒 ({actual_end_time/60:.2f}分钟)")
+        print(f"反应结束时间: {REACTION_END_TIME:.1f}秒 ({REACTION_END_TIME/60:.2f}分钟)")
         print(f"窗口范围: {window_start:.1f}秒 到 {window_end:.1f}秒")
         
         if window_end > window_start:
@@ -1355,6 +1360,8 @@ for path in files:
             
             # 创建关键时间点数据
             key_times = [0, 60, 120, 180, 240, 300, 360, 600, 900, 1200]
+            # 只保留在反应时间范围内的关键时间点
+            key_times = [t for t in key_times if t <= REACTION_END_TIME]
             key_burn_data = []
             
             for t in key_times:
@@ -1468,7 +1475,7 @@ for path in files:
         # 如果没有整数秒的数据，则取最接近整数秒的数据
         if len(chart_data) == 0:
             # 创建整数秒的时间点
-            max_time = int(df['时间(s)'].max())
+            max_time = int(REACTION_END_TIME)  # 使用反应结束时间
             time_points = list(range(0, max_time + 1))
             
             chart_rows = []
@@ -1526,7 +1533,12 @@ for path in files:
         
         # 设置图表属性
         chart1.set_title({'name': '流量曲线对比图'})
-        chart1.set_x_axis({'name': '时间 (秒)'})
+        chart1.set_x_axis({
+            'name': '时间 (秒)',
+            'min': 0,
+            'max': REACTION_END_TIME,
+            'major_unit': max(100, int(REACTION_END_TIME/10))
+        })
         chart1.set_y_axis({'name': '流量 (L/Min)'})
         chart1.set_size({'width': 720, 'height': 480})
         worksheet.insert_chart('H2', chart1)
@@ -1581,7 +1593,12 @@ for path in files:
                 
                 # 设置图表属性
                 chart3.set_title({'name': '流量-温度综合分析图'})
-                chart3.set_x_axis({'name': '时间 (秒)'})
+                chart3.set_x_axis({
+                    'name': '时间 (秒)',
+                    'min': 0,
+                    'max': REACTION_END_TIME,
+                    'major_unit': max(100, int(REACTION_END_TIME/10))
+                })
                 chart3.set_y_axis({'name': '流量 (L/Min)', 'major_gridlines': {'visible': True}})
                 chart3.set_y2_axis({'name': '温度 (°C)'})
                 chart3.set_size({'width': 720, 'height': 480})
@@ -1626,7 +1643,12 @@ for path in files:
             })
             
             chart2.set_title({'name': '产氧量-燃烧深度关系图'})
-            chart2.set_x_axis({'name': '时间 (秒)'})
+            chart2.set_x_axis({
+                'name': '时间 (秒)',
+                'min': 0,
+                'max': REACTION_END_TIME,
+                'major_unit': max(100, int(REACTION_END_TIME/10))
+            })
             chart2.set_y_axis({'name': '产氧量 (L)', 'major_gridlines': {'visible': True}})
             chart2.set_y2_axis({'name': '燃烧深度 (mm)'})
             chart2.set_size({'width': 720, 'height': 480})
