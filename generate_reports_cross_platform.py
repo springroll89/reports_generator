@@ -91,8 +91,11 @@ def calculate_cumulative_flow(df, active_sensors):
     """计算累积流量（升）- 基于所有活跃传感器的总流量"""
     # 计算所有活跃传感器的总流量
     total_flow = df[active_sensors].sum(axis=1)
-    # 时间间隔是0.5秒，流量单位是L/Min
-    cumulative = np.cumsum(total_flow.values * 0.5 / 60)
+    # 使用梯形积分计算累积流量
+    cumulative = np.zeros(len(df))
+    for i in range(1, len(df)):
+        # 计算到当前时间点的累积流量
+        cumulative[i] = trapezoid(total_flow.values[:i+1], df['时间(s)'].values[:i+1]) / 60
     return cumulative
 
 def find_stable_period(df, cumulative_flow, reaction_end_time):
