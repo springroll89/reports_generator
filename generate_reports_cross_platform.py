@@ -272,14 +272,14 @@ def read_temperature_data(input_dir):
     for encoding in encodings:
         try:
             temp_df = pd.read_csv(temp_file, encoding=encoding)
-            # 检查是否包含CH1-CH3列
-            required_cols = ['CH1', 'CH2', 'CH3']
+            # 检查是否包含CH1-CH6列
+            required_cols = ['CH1', 'CH2', 'CH3', 'CH4', 'CH5', 'CH6']
             if all(col in temp_df.columns for col in required_cols):
                 # 提取温度数据
                 temp_data = temp_df[required_cols].values
                 # 清洗温度数据（使用较小的窗口）
                 smoothed_temp = np.zeros_like(temp_data)
-                for i in range(3):
+                for i in range(6):  # 改为6路
                     smoothed_temp[:, i] = clean_flow_data(temp_data[:, i], window_length=7, polyorder=2)
                 
                 # 温度数据是2秒采样，返回实际时长
@@ -450,6 +450,9 @@ for path in files:
         df['CH1温度'] = np.nan
         df['CH2温度'] = np.nan
         df['CH3温度'] = np.nan
+        df['CH4温度'] = np.nan
+        df['CH5温度'] = np.nan
+        df['CH6温度'] = np.nan
         
         # 温度数据是2秒采样，需要插值到0.5秒采样的流量数据时间点
         temp_data_points = len(temperature_data)
@@ -458,7 +461,7 @@ for path in files:
         print(f"温度数据插值: {temp_data_points}个点，时间范围0-{temp_time_points[-1]}秒")
         
         # 对每个温度通道进行插值
-        for i, ch in enumerate(['CH1温度', 'CH2温度', 'CH3温度']):
+        for i, ch in enumerate(['CH1温度', 'CH2温度', 'CH3温度', 'CH4温度', 'CH5温度', 'CH6温度']):
             # 使用线性插值将2秒采样的温度数据映射到0.5秒采样的时间点
             interpolated_temp = np.interp(
                 df['时间(s)'].values,  # 目标时间点（0.5秒间隔）
@@ -720,12 +723,34 @@ for path in files:
         
         # 创建DataFrame并写入Excel
         ignition_df = pd.DataFrame(ignition_test_data)
+        
+        # 添加温度监测数据列（如果有）
+        if temperature_data is not None and all(col in df.columns for col in ['CH1温度', 'CH4温度', 'CH6温度']):
+            # 计算各部位最高温度
+            max_shell_temp = df['CH1温度'].max()  # 外壳最高温度（取CH1）
+            max_insulation_temp = df['CH4温度'].max()  # 隔热垫外最高温度（取CH4）
+            max_outlet_temp = df['CH6温度'].max()  # 供氧口最高温度（取CH6）
+            
+            # 在DataFrame中添加温度列
+            ignition_df['外壳最高温度(°C)'] = ''
+            ignition_df['隔热垫外最高温度(°C)'] = ''
+            ignition_df['供氧口最高温度(°C)'] = ''
+            
+            # 在最后一行（总计行）填入温度数据
+            last_row_idx = len(ignition_df) - 1
+            ignition_df.loc[last_row_idx, '外壳最高温度(°C)'] = round(max_shell_temp, 1) if not np.isnan(max_shell_temp) else '-'
+            ignition_df.loc[last_row_idx, '隔热垫外最高温度(°C)'] = round(max_insulation_temp, 1) if not np.isnan(max_insulation_temp) else '-'
+            ignition_df.loc[last_row_idx, '供氧口最高温度(°C)'] = round(max_outlet_temp, 1) if not np.isnan(max_outlet_temp) else '-'
+        
         ignition_df.to_excel(writer, sheet_name='点火测试记录数据', index=False)
         
         # 设置点火测试记录数据的格式
         ignition_sheet = writer.sheets['点火测试记录数据']
         ignition_sheet.set_column('A:A', 20)
         ignition_sheet.set_column('B:G', 25)
+        # 设置温度列的宽度
+        if temperature_data is not None:
+            ignition_sheet.set_column('H:J', 20)
         
         # 10.4) 平稳性分析
         print("\n=== 平稳性分析 ===")
@@ -1551,7 +1576,9 @@ for path in files:
             print("创建流量-温度综合分析图...")
             
             # 创建综合分析数据
-            temp_chart_cols = ['时间(s)', '平均流量L/Min', 'CH1温度', 'CH2温度', 'CH3温度']
+            temp_chart_cols = ['时间(s)', '平均流量L/Min', 
+                               'CH1温度', 'CH2温度', 'CH3温度', 
+                               'CH4温度', 'CH5温度', 'CH6温度']
             
             # 检查是否所有列都存在
             missing_cols = [col for col in temp_chart_cols if col not in chart_data.columns]
@@ -1575,21 +1602,31 @@ for path in files:
                         'name': '平均流量',
                         'categories': ['流量-温度综合分析', 1, 0, len(temp_chart_df), 0],
                         'values': ['流量-温度综合分析', 1, 1, len(temp_chart_df), 1],
-                        'line': {'color': 'blue', 'width': 2.5}
+                        'line': {'color': 'black', 'width': 2.5}
                     })
                 
                 # 添加温度系列（右侧Y轴）
-                temp_colors = ['red', 'green', 'orange']
-                temp_names = ['CH1温度', 'CH2温度', 'CH3温度']
+                # 使用区分度更高的颜色
+                temp_colors = ['#CC0000',   # 深红色 - 外壳上
+                               '#FF6600',   # 橙色 - 外壳中
+                               '#FFB300',   # 金黄色 - 外壳下
+                               '#009900',   # 深绿色 - 隔热垫上
+                               '#9900CC',   # 紫色 - 隔热垫中
+                               '#0066CC']   # 深蓝色 - 供氧口
+                temp_names = ['CH1温度', 'CH2温度', 'CH3温度', 'CH4温度', 'CH5温度', 'CH6温度']
+                # 简化的图例名称
+                temp_legend_names = ['外壳上', '外壳中', '外壳下', 
+                                    '隔热垫上', '隔热垫中', '供氧口']
+                
                 col_idx = 2  # 从第3列开始（索引2）
                 
-                for name, color in zip(temp_names, temp_colors):
+                for name, legend_name, color in zip(temp_names, temp_legend_names, temp_colors):
                     if name in temp_chart_df.columns:
                         chart3.add_series({
-                            'name': name,
+                            'name': legend_name,
                             'categories': ['流量-温度综合分析', 1, 0, len(temp_chart_df), 0],
                             'values': ['流量-温度综合分析', 1, col_idx, len(temp_chart_df), col_idx],
-                            'line': {'color': color, 'width': 2},
+                            'line': {'color': color, 'width': 1.5},
                             'y2_axis': True  # 右侧Y轴
                         })
                         col_idx += 1
