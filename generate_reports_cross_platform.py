@@ -386,22 +386,48 @@ for path in files:
         df[sensor] = cleaned_data
     
     # 5) 判断模式（基于清洗后的数据）
-    sensor_3_has_data = (df['3号瞬时流量L/Min'] > 0.1).any()
-    sensor_4_has_data = (df['4号瞬时流量L/Min'] > 0.1).any()
+    # 检查每个传感器是否有数据
+    sensors_with_data = []
+    for i, sensor in enumerate(SENSORS):
+        if (df[sensor] > 0.1).any():
+            sensors_with_data.append(i)  # 记录有数据的传感器索引（0-3）
     
-    if sensor_3_has_data and sensor_4_has_data:
-        # 4P模式：使用所有4个传感器
+    # 根据有数据的传感器数量判断模式
+    num_active_sensors = len(sensors_with_data)
+    
+    if num_active_sensors == 4:
+        # 4P模式：所有4个传感器都有数据
         active_sensors = SENSORS
         mode = '4P22M'
         scale_df = scale_4p22m
-    else:
-        # 2P模式：只使用1号和2号传感器
-        active_sensors = SENSORS[:2]
+        print(f"✅ 检测到模式: {mode} (所有4个传感器)")
+    elif num_active_sensors == 2:
+        # 2P模式：恰好2个传感器有数据
+        active_sensors = [SENSORS[i] for i in sensors_with_data]
         mode = '2P22M'
         scale_df = scale_2p22m
+        sensor_names = [s.replace('瞬时流量L/Min', '') for s in active_sensors]
+        print(f"✅ 检测到模式: {mode} (传感器: {', '.join(sensor_names)})")
+    elif num_active_sensors == 3:
+        # 3个传感器有数据，提示异常但继续处理
+        print(f"⚠️ 检测到3个传感器有数据，这不是标准配置")
+        active_sensors = [SENSORS[i] for i in sensors_with_data]
+        mode = '4P22M'  # 使用4P的刻度表
+        scale_df = scale_4p22m
+        sensor_names = [s.replace('瞬时流量L/Min', '') for s in active_sensors]
+        print(f"   使用传感器: {', '.join(sensor_names)}")
+    elif num_active_sensors == 1:
+        # 只有1个传感器有数据
+        print(f"❌ 只检测到1个传感器有数据，数据可能异常")
+        active_sensors = [SENSORS[i] for i in sensors_with_data]
+        mode = '2P22M'  # 使用2P的刻度表
+        scale_df = scale_2p22m
+    else:
+        # 没有传感器有数据
+        print(f"❌ 未检测到任何传感器数据")
+        exit(1)
     
-    print(f"✅ 检测到模式: {mode}")
-    print(f"✅ 活跃传感器: {active_sensors}")
+    print(f"✅ 活跃传感器: {[s.replace('瞬时流量L/Min', '') for s in active_sensors]}")
     
     # 6) 计算平均流量（基于清洗后的数据）
     df['平均流量L/Min'] = df[active_sensors].mean(axis=1)
@@ -943,7 +969,7 @@ for path in files:
                 'name': '平均流量',
                 'categories': ['平稳性分析', chart_start_row + 1, 0, chart_start_row + data_rows - 1, 0],
                 'values': ['平稳性分析', chart_start_row + 1, 5, chart_start_row + data_rows - 1, 5],
-                'line': {'color': '#0066CC', 'width': 3}
+                'line': {'color': 'black', 'width': 3}
             })
             
             # 基准流量 - 平稳期
