@@ -751,11 +751,18 @@ for path in files:
         ignition_df = pd.DataFrame(ignition_test_data)
         
         # 添加温度监测数据列（如果有）
-        if temperature_data is not None and all(col in df.columns for col in ['CH1温度', 'CH4温度', 'CH6温度']):
+        if temperature_data is not None and all(col in df.columns for col in ['CH1温度', 'CH2温度', 'CH3温度', 'CH4温度', 'CH5温度', 'CH6温度']):
             # 计算各部位最高温度
-            max_shell_temp = df['CH1温度'].max()  # 外壳最高温度（取CH1）
-            max_insulation_temp = df['CH4温度'].max()  # 隔热垫外最高温度（取CH4）
-            max_outlet_temp = df['CH6温度'].max()  # 供氧口最高温度（取CH6）
+            # 外壳最高温度：取CH1-CH3的最大值
+            shell_temps = df[['CH1温度', 'CH2温度', 'CH3温度']].max(axis=1)
+            max_shell_temp = shell_temps.max()
+            
+            # 隔热垫外最高温度：取CH4-CH5的最大值
+            insulation_temps = df[['CH4温度', 'CH5温度']].max(axis=1)
+            max_insulation_temp = insulation_temps.max()
+            
+            # 供氧口最高温度：取CH6
+            max_outlet_temp = df['CH6温度'].max()
             
             # 在DataFrame中添加温度列
             ignition_df['外壳最高温度(°C)'] = ''
